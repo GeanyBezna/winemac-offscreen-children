@@ -1,293 +1,284 @@
-# Wine (CrossOver 26.2.0 source) — winemac.drv: conditional offscreen presentation for
-# windows with visible child windows (ticket 001, T-23).
-#
-# Problem: under winemac a GL window is presented as a separate surface above the window's
-# GDI content, so GDI child windows (CEF login/channel panels) are invisible.
-# Fix: while a window has visible child windows, render into the (hidden) GL view, read the
-# frame back and blit it into the window surface, clipping out the child windows; without
-# visible children, present the GL view normally (no per-frame copy).  Environment-level
-# only: no game/client files are touched.
-#
-# AI-assisted ("vibe-coded") during a real debugging session; workaround, no warranty, review before use.
-# Build: ~/GameLab/build/cx-26.2.0-x11 (configures against ~/GameLab/src/cx-26.2.0/sources/wine)
-#   make -j8 dlls/winemac.drv/winemac.so
-#   cp dlls/winemac.drv/winemac.so ~/GameLab/wine-cx-x11/lib/wine/x86_64-unix/winemac.so
-# Rollback: restore winemac.so.orig-T22 (kept next to the installed driver).
+winemac.drv: present OpenGL windows through the window surface while child windows cover them.
+
+The OpenGL view of a window is composited above the window surface, which also holds the
+pixels of the window's GDI child windows (for instance embedded CEF/Chromium panels), so
+those children are invisible over an OpenGL window. winex11.drv solves the same problem
+with offscreen rendering (client_surface.offscreen + present(hdc)); winemac.drv ignored
+the hdc and never went offscreen.
+
+With this change, while visible child windows overlap the client area of an OpenGL
+window:
+- macdrv_client_surface_update() marks the client surface offscreen;
+- SwapBuffers reads the finished frame from the drawable's own back buffer, saving and
+  restoring the read framebuffer, read buffer, pixel pack buffer and pack parameters;
+- win32u then calls present(hdc), which copies the frame into the window surface with
+  the child windows clipped out, and keeps the GL view hidden.
+Without such children nothing changes: the GL view is presented as before, with no copy.
+Vulkan and D3DMetal surfaces are not affected.
+
+Tested on Wine 11.0 from the CrossOver 26.2.0 sources, macOS 26, Apple Silicon.
+AI-assisted; review before use.
+
 --- a/dlls/winemac.drv/macdrv.h
 +++ b/dlls/winemac.drv/macdrv.h
-@@ -212,7 +212,7 @@
-     return CONTAINING_RECORD(client, struct macdrv_client_surface, client);
- }
+@@ -205,6 +205,13 @@ struct macdrv_client_surface
+     macdrv_view           cocoa_view;
+     macdrv_metal_device   metal_device;
+     macdrv_metal_view     metal_view;
++    BOOL                  view_hidden;
++    BOOL                  allow_offscreen;  /* OpenGL: may be presented through the window surface */
++    BOOL                  offscreen_valid;  /* offscreen_bits holds a frame to present */
++    void                 *offscreen_bits;   /* bottom-up BGRA frame read back from OpenGL */
++    size_t                offscreen_size;
++    int                   offscreen_width;
++    int                   offscreen_height;
+ };
  
--extern struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd);
-+extern struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd, BOOL present_view);
- 
- extern struct macdrv_win_data *get_win_data(HWND hwnd);
- extern void release_win_data(struct macdrv_win_data *data);
+ static inline struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client)
 --- a/dlls/winemac.drv/window.c
 +++ b/dlls/winemac.drv/window.c
-@@ -1215,7 +1215,7 @@
-     .present = macdrv_client_surface_present,
- };
+@@ -1148,6 +1148,7 @@ static void macdrv_client_surface_destroy(struct clien
  
--struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd)
-+struct macdrv_client_surface *macdrv_client_surface_create(HWND hwnd, BOOL present_view)
- {
-     HWND toplevel = NtUserGetAncestor(hwnd, GA_ROOT);
-     struct macdrv_client_surface *surface;
-@@ -1231,7 +1231,7 @@
-     if (surface)
-     {
-         macdrv_client_surface_update(&surface->client);
--        macdrv_client_surface_present(&surface->client, 0);
-+        if (present_view) macdrv_client_surface_present(&surface->client, 0);
-     }
- 
-     return surface;
---- a/dlls/winemac.drv/vulkan.c
-+++ b/dlls/winemac.drv/vulkan.c
-@@ -51,7 +51,7 @@
- 
-     TRACE("%p %p %p %p\n", hwnd, instance, handle, client);
- 
--    if (!(surface = macdrv_client_surface_create(hwnd))) return VK_ERROR_OUT_OF_HOST_MEMORY;
-+    if (!(surface = macdrv_client_surface_create(hwnd, TRUE))) return VK_ERROR_OUT_OF_HOST_MEMORY;
-     if (!(surface->metal_device = macdrv_create_metal_device())) goto err;
-     if (!(surface->metal_view = macdrv_view_create_metal_view(surface->cocoa_view, surface->metal_device))) goto err;
- 
---- a/dlls/winemac.drv/d3dmetal.c
-+++ b/dlls/winemac.drv/d3dmetal.c
-@@ -109,7 +109,7 @@
-      * They do:
-      * get_win_data() -> create_metal_device() -> create_metal_view() -> get_metal_layer() -> release_win_data()
-      */
--    client_surface = macdrv_client_surface_create(hwnd);
-+    client_surface = macdrv_client_surface_create(hwnd, TRUE);
- 
-     /* get_win_data() needs to happen after client_surface creation to avoid deadlocks */
-     data = get_win_data(hwnd);
---- a/dlls/winemac.drv/opengl.c
-+++ b/dlls/winemac.drv/opengl.c
-@@ -77,6 +77,15 @@
- {
-     struct opengl_drawable  base;
-     CGLPBufferObj           pbuffer;
-+    /* T23: when the window has visible child windows (the in-game CEF panels) the frame is
-+       read back and blitted into the window surface, so those GDI children stay visible.
-+       Without visible children the GL view is presented normally (no per-frame copy). */
-+    HWND                    hwnd;
-+    int                     width, height;
-+    void                   *bits;
-+    size_t                  bits_size;
-+    void                   *row;
-+    BOOL                    offscreen;
- };
- 
- static struct gl_drawable *impl_from_opengl_drawable(struct opengl_drawable *base)
-@@ -97,6 +106,7 @@
- static PFN_glGetIntegerv pglGetIntegerv;
- static void (*pglReadPixels)(GLint x, GLint y, GLsizei width, GLsizei height,
-                              GLenum format, GLenum type, void *pixels);
-+static void (*pglReadBuffer)(GLenum mode);
- static void (*pglTexImage3D)( GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void *pixels );
- static void (*pglTexSubImage3D)( GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *pixels );
- 
-@@ -1457,13 +1467,73 @@
-     TRACE("created context %p/%p/%p\n", context, context->context, context->cglcontext);
- 
-     return TRUE;
-+}
-+
-+static BOOL window_has_visible_children(HWND hwnd)
-+{
-+    UINT dpi = NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI);
-+    HWND child;
-+
-+    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child;
-+         child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
-+    {
-+        RECT rect;
-+
-+        if (!NtUserIsWindowVisible(child)) continue;
-+        if (!NtUserGetClientRect(child, &rect, dpi)) continue;
-+        if (rect.right > rect.left && rect.bottom > rect.top) return TRUE;
-+    }
-+    return FALSE;
-+}
-+
-+static BOOL get_window_pixel_size(HWND hwnd, int *width, int *height)
-+{
-+    RECT rect;
-+
-+    if (!NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI))) return FALSE;
-+    *width = rect.right - rect.left;
-+    *height = rect.bottom - rect.top;
-+    return *width > 0 && *height > 0;
+     if (surface->metal_view) macdrv_view_release_metal_view(surface->metal_view);
+     if (surface->metal_device) macdrv_release_metal_device(surface->metal_device);
++    free(surface->offscreen_bits);
  }
  
-+static void blit_frame_to_window(struct gl_drawable *gl, int width, int height)
+ static void macdrv_client_surface_detach(struct client_surface *client)
+@@ -1168,9 +1169,65 @@ static void macdrv_client_surface_detach(struct client
+         }
+ 
+         macdrv_dispose_view(surface->cocoa_view);
++    }
++}
++
++/* The GL view is composited above the window surface, which also holds the pixels of the
++   child windows; while visible child windows cover part of the client area, the frame is
++   presented through the window surface instead, below the children. */
++static BOOL needs_offscreen_rendering(HWND hwnd)
 +{
-+    BITMAPINFO info;
-+    UINT dpi = NtUserGetWinMonitorDpi(gl->hwnd, MDT_RAW_DPI);
-+    HDC hdc;
++    UINT dpi = NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI);
++    RECT client, rect;
 +    HWND child;
 +
-+    if (!gl->bits || !(hdc = NtUserGetDCEx(gl->hwnd, 0, DCX_CACHE | DCX_USESTYLE))) return;
++    if (!(child = NtUserGetWindowRelative(hwnd, GW_CHILD))) return FALSE;
++    if (!NtUserGetClientRect(hwnd, &client, dpi)) return FALSE;
 +
-+    for (child = NtUserGetWindowRelative(gl->hwnd, GW_CHILD); child;
-+         child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
++    for (; child; child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
 +    {
-+        RECT rect;
++        if (!NtUserIsWindowVisible(child) || !NtUserGetWindowRect(child, &rect, dpi)) continue;
++        NtUserMapWindowPoints(0, hwnd, (POINT *)&rect, 2, dpi);
++        if (rect.left < client.right && rect.right > client.left &&
++            rect.top < client.bottom && rect.bottom > client.top)
++            return TRUE;
+     }
 +
-+        if (!NtUserIsWindowVisible(child)) continue;
-+        if (!NtUserGetWindowRect(child, &rect, dpi)) continue;
-+        NtUserMapWindowPoints(0, gl->hwnd, (POINT *)&rect, 2, dpi);
++    return FALSE;
+ }
+ 
++static void present_offscreen_frame(struct macdrv_client_surface *surface, HDC hdc)
++{
++    HWND hwnd = surface->client.hwnd, child;
++    UINT dpi = NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI);
++    BITMAPINFO info;
++    RECT rect;
++
++    NtGdiSaveDC(hdc);
++
++    /* the window may not have WS_CLIPCHILDREN, keep the children's pixels anyway */
++    for (child = NtUserGetWindowRelative(hwnd, GW_CHILD); child; child = NtUserGetWindowRelative(child, GW_HWNDNEXT))
++    {
++        if (!NtUserIsWindowVisible(child) || !NtUserGetWindowRect(child, &rect, dpi)) continue;
++        NtUserMapWindowPoints(0, hwnd, (POINT *)&rect, 2, dpi);
 +        NtGdiExcludeClipRect(hdc, rect.left, rect.top, rect.right, rect.bottom);
 +    }
 +
 +    memset(&info, 0, sizeof(info));
-+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-+    info.bmiHeader.biWidth = width;
-+    info.bmiHeader.biHeight = height;  /* bottom-up: same row order as glReadPixels */
++    info.bmiHeader.biSize = sizeof(info.bmiHeader);
++    info.bmiHeader.biWidth = surface->offscreen_width;
++    info.bmiHeader.biHeight = surface->offscreen_height; /* bottom-up, like glReadPixels */
 +    info.bmiHeader.biPlanes = 1;
 +    info.bmiHeader.biBitCount = 32;
 +    info.bmiHeader.biCompression = BI_RGB;
-+    NtGdiSetDIBitsToDeviceInternal(hdc, 0, 0, width, height, 0, 0, 0, height, gl->bits, &info,
-+                                   DIB_RGB_COLORS, width * height * 4, sizeof(BITMAPINFO), FALSE, 0);
-+    NtUserReleaseDC(gl->hwnd, hdc);
++    NtGdiSetDIBitsToDeviceInternal(hdc, 0, 0, surface->offscreen_width, surface->offscreen_height, 0, 0, 0,
++                                   surface->offscreen_height, surface->offscreen_bits, &info, DIB_RGB_COLORS,
++                                   (size_t)surface->offscreen_width * surface->offscreen_height * 4,
++                                   sizeof(info), FALSE, NULL);
++
++    NtGdiRestoreDC(hdc, -1);
 +}
 +
- static BOOL macdrv_surface_create(HWND hwnd, int format, struct opengl_drawable **drawable)
+ static void macdrv_client_surface_update(struct client_surface *client)
  {
-     struct macdrv_client_surface *client;
+     struct macdrv_client_surface *surface = impl_from_client_surface(client);
+@@ -1179,6 +1236,9 @@ static void macdrv_client_surface_update(struct client
+     RECT rect;
+ 
+     TRACE("%s\n", debugstr_client_surface(client));
++
++    if (surface->allow_offscreen)
++        InterlockedExchange(&client->offscreen, needs_offscreen_rendering(hwnd));
+ 
+     NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI));
+     NtUserMapWindowPoints(hwnd, toplevel, (POINT *)&rect, 2, NtUserGetWinMonitorDpi(toplevel, MDT_RAW_DPI));
+@@ -1193,16 +1253,26 @@ static void macdrv_client_surface_present(struct clien
+ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc)
+ {
+     struct macdrv_client_surface *surface = impl_from_client_surface(client);
++    BOOL hidden = hdc && surface->offscreen_valid;
      struct macdrv_win_data *data;
-     struct gl_drawable *gl;
-+    int width, height;
  
-     TRACE("hwnd %p, format %d, drawable %p\n", hwnd, format, drawable);
+-    TRACE("%s\n", debugstr_client_surface(client));
++    TRACE("%s hdc %p\n", debugstr_client_surface(client), hdc);
  
-@@ -1476,18 +1546,32 @@
-     data->pixel_format = format;
++    /* offscreen: the frame goes into the window surface and the view stays hidden */
++    if (hidden) present_offscreen_frame(surface, hdc);
++    surface->offscreen_valid = FALSE;
++
+     if (!(data = get_win_data(surface->client.hwnd))) return;
+     if (data->client_view != surface->cocoa_view)
+     {
+         if (data->client_view) macdrv_set_view_hidden(data->client_view, TRUE);
+-        macdrv_set_view_hidden(surface->cocoa_view, FALSE);
+-        data->client_view = surface->cocoa_view;
++        data->client_view = surface->cocoa_view;
++        surface->view_hidden = !hidden;
++    }
++    if (surface->view_hidden != hidden)
++    {
++        macdrv_set_view_hidden(surface->cocoa_view, hidden);
++        surface->view_hidden = hidden;
+     }
+     release_win_data(data);
+ }
+@@ -1230,6 +1300,7 @@ struct macdrv_client_surface *macdrv_client_surface_cr
+ 
+     if (surface)
+     {
++        surface->view_hidden = TRUE;
+         macdrv_client_surface_update(&surface->client);
+         macdrv_client_surface_present(&surface->client, 0);
+     }
+--- a/dlls/winemac.drv/opengl.c
++++ b/dlls/winemac.drv/opengl.c
+@@ -77,6 +77,7 @@ struct gl_drawable
+ {
+     struct opengl_drawable  base;
+     CGLPBufferObj           pbuffer;
++    BOOL                    offscreen;  /* last frame was presented through the window surface */
+ };
+ 
+ static struct gl_drawable *impl_from_opengl_drawable(struct opengl_drawable *base)
+@@ -90,11 +91,15 @@ static const struct opengl_drawable_funcs macdrv_pbuff
+ static const struct opengl_drawable_funcs macdrv_surface_funcs;
+ static const struct opengl_drawable_funcs macdrv_pbuffer_funcs;
+ 
++static void (*pglBindBuffer)(GLenum target, GLuint buffer);
++static void (*pglBindFramebuffer)(GLenum target, GLuint framebuffer);
+ static void (*pglCopyColorTable)(GLenum target, GLenum internalformat, GLint x, GLint y,
+                                  GLsizei width);
+ static void (*pglCopyPixels)(GLint x, GLint y, GLsizei width, GLsizei height, GLenum type);
+ static const GLubyte *(*pglGetString)(GLenum name);
+ static PFN_glGetIntegerv pglGetIntegerv;
++static void (*pglPixelStorei)(GLenum pname, GLint param);
++static void (*pglReadBuffer)(GLenum mode);
+ static void (*pglReadPixels)(GLint x, GLint y, GLsizei width, GLsizei height,
+                              GLenum format, GLenum type, void *pixels);
+ static void (*pglTexImage3D)( GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void *pixels );
+@@ -1477,6 +1482,7 @@ static BOOL macdrv_surface_create(HWND hwnd, int forma
      release_win_data(data);
  
--    if (!(client = macdrv_client_surface_create(hwnd))) return FALSE;
-+    /* T23: the GL view starts hidden; the frame is blitted into the window surface as long as
-+       the window has visible children (see macdrv_surface_swap). */
-+    if (!(client = macdrv_client_surface_create(hwnd, FALSE))) return FALSE;
+     if (!(client = macdrv_client_surface_create(hwnd))) return FALSE;
++    client->allow_offscreen = TRUE;
      gl = opengl_drawable_create(sizeof(*gl), &macdrv_surface_funcs, format, &client->client);
      client_surface_release(&client->client);
      if (!gl) return FALSE;
-+    gl->offscreen = TRUE;
- 
-+    /* T23: render into the (hidden) view drawable, read the frame back and blit it into
-+       the window surface; child windows then stay visible above the GL content. */
-+    if (get_window_pixel_size(hwnd, &width, &height))
-+        gl->hwnd = hwnd;
-+
-     *drawable = &gl->base;
-     return TRUE;
- }
- 
- static void macdrv_surface_destroy(struct opengl_drawable *base)
- {
-+    struct gl_drawable *gl = impl_from_opengl_drawable(base);
-+
-     TRACE("drawable %s\n", debugstr_opengl_drawable(base));
-+
-+    if (gl->pbuffer) CGLReleasePBuffer(gl->pbuffer);
-+    free(gl->bits);
-+    free(gl->row);
- }
- 
- /**********************************************************************
-@@ -2289,7 +2373,10 @@
-     {
-         struct macdrv_client_surface *client = impl_from_client_surface(draw->base.client);
-         context->draw_hwnd = draw->base.client->hwnd;
--        context->draw_view = client->cocoa_view;
-+        if (draw->hwnd && draw->pbuffer)
-+            context->draw_pbuffer = draw->pbuffer;
-+        else
-+            context->draw_view = client->cocoa_view;
-     }
-     else
-     {
-@@ -2302,7 +2389,10 @@
-         {
-             struct macdrv_client_surface *client = impl_from_client_surface(read->base.client);
-             context->read_hwnd = read->base.client->hwnd;
--            context->read_view = client->cocoa_view;
-+            if (read->hwnd && read->pbuffer)
-+                context->read_pbuffer = read->pbuffer;
-+            else
-+                context->read_view = client->cocoa_view;
+@@ -2722,9 +2728,13 @@ UINT macdrv_OpenGLInit(UINT version, const struct open
+             ERR( "%s not found in libGL, disabling OpenGL.\n", #func ); \
+             goto failed; \
          }
-         else
-         {
-@@ -2726,6 +2816,7 @@
++    LOAD_FUNCPTR(glBindBuffer);
++    LOAD_FUNCPTR(glBindFramebuffer);
+     LOAD_FUNCPTR(glCopyPixels);
      LOAD_FUNCPTR(glGetIntegerv);
      LOAD_FUNCPTR(glGetString);
-     LOAD_FUNCPTR(glReadPixels);
++    LOAD_FUNCPTR(glPixelStorei);
 +    LOAD_FUNCPTR(glReadBuffer);
+     LOAD_FUNCPTR(glReadPixels);
      LOAD_FUNCPTR(glCopyColorTable);
      LOAD_FUNCPTR(glTexImage3D);
-     LOAD_FUNCPTR(glTexSubImage3D);
-@@ -2865,11 +2956,58 @@
+@@ -2861,16 +2871,72 @@ static void *macdrv_get_proc_address(const char *name)
+     if (!strcmp(name, "glCompressedTexImage3D")) return macdrv_glCompressedTexImage3D;
+     if (!strcmp(name, "glCompressedTexSubImage3D")) return macdrv_glCompressedTexSubImage3D;
+     return dlsym(opengl_handle, name);
++}
++
++/* Read the finished frame from the drawable's own framebuffer, whatever the application
++   left bound, and restore its state afterwards. */
++static void read_offscreen_frame(struct macdrv_client_surface *client, BOOL doublebuffer)
++{
++    static const GLenum pack_names[] = {GL_PACK_ALIGNMENT, GL_PACK_ROW_LENGTH, GL_PACK_SKIP_ROWS,
++                                        GL_PACK_SKIP_PIXELS, GL_PACK_SWAP_BYTES};
++    static const GLint pack_values[] = {4, 0, 0, 0, GL_FALSE};
++    GLint read_fbo = 0, read_buffer = 0, pack_buffer = 0, pack[ARRAY_SIZE(pack_names)];
++    HWND hwnd = client->client.hwnd;
++    size_t size;
++    RECT rect;
++    UINT i;
++
++    if (!NtUserGetClientRect(hwnd, &rect, NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI))) return;
++    if (rect.right <= rect.left || rect.bottom <= rect.top) return;
++
++    size = (size_t)(rect.right - rect.left) * (rect.bottom - rect.top) * 4;
++    if (size > client->offscreen_size)
++    {
++        free(client->offscreen_bits);
++        client->offscreen_size = 0;
++        if (!(client->offscreen_bits = malloc(size))) return;
++        client->offscreen_size = size;
++    }
++    client->offscreen_width = rect.right - rect.left;
++    client->offscreen_height = rect.bottom - rect.top;
++
++    pglGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fbo);
++    if (read_fbo) pglBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
++    pglGetIntegerv(GL_READ_BUFFER, &read_buffer);
++    pglReadBuffer(doublebuffer ? GL_BACK : GL_FRONT);
++    pglGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
++    if (pack_buffer) pglBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
++    for (i = 0; i < ARRAY_SIZE(pack_names); i++)
++    {
++        pglGetIntegerv(pack_names[i], &pack[i]);
++        pglPixelStorei(pack_names[i], pack_values[i]);
++    }
++
++    pglReadPixels(0, 0, client->offscreen_width, client->offscreen_height, GL_BGRA,
++                  GL_UNSIGNED_INT_8_8_8_8_REV, client->offscreen_bits);
++    client->offscreen_valid = TRUE;
++
++    for (i = 0; i < ARRAY_SIZE(pack_names); i++) pglPixelStorei(pack_names[i], pack[i]);
++    if (pack_buffer) pglBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
++    pglReadBuffer(read_buffer);
++    if (read_fbo) pglBindFramebuffer(GL_READ_FRAMEBUFFER, read_fbo);
+ }
  
  static BOOL macdrv_surface_swap(struct opengl_drawable *base)
  {
++    struct macdrv_client_surface *client = impl_from_client_surface(base->client);
 +    struct gl_drawable *gl = impl_from_opengl_drawable(base);
      struct macdrv_context *context = NtCurrentTeb()->glReserved2;
-+    int width, height;
++    BOOL offscreen = InterlockedCompareExchange(&base->client->offscreen, 0, 0);
  
-     TRACE("%s context %p/%p/%p\n", debugstr_opengl_drawable(base), context, (context ? context->context : NULL),
-           (context ? context->cglcontext : NULL));
+-    TRACE("%s context %p/%p/%p\n", debugstr_opengl_drawable(base), context, (context ? context->context : NULL),
+-          (context ? context->cglcontext : NULL));
++    TRACE("%s context %p/%p/%p offscreen %u\n", debugstr_opengl_drawable(base), context,
++          (context ? context->context : NULL), (context ? context->cglcontext : NULL), offscreen);
  
-+    if (!context) return FALSE;
-+
-+    if (gl->hwnd)
-+    {
-+        BOOL offscreen = window_has_visible_children(gl->hwnd);
-+
-+        if (offscreen != gl->offscreen)
-+        {
-+            struct macdrv_client_surface *client;
-+
-+            TRACE("hwnd %p: %s offscreen rendering\n", gl->hwnd, offscreen ? "enabling" : "disabling");
-+            gl->offscreen = offscreen;
-+            if (gl->base.client && (client = impl_from_client_surface(gl->base.client)))
-+                macdrv_set_view_hidden(client->cocoa_view, offscreen);
-+        }
-+
-+        if (offscreen && !get_window_pixel_size(gl->hwnd, &width, &height)) return FALSE;
-+    }
-+
-+    if (gl->hwnd && gl->offscreen)
-+    {
-+        if (gl->bits_size < (size_t)width * height * 4)
-+        {
-+            free(gl->bits);
-+            free(gl->row);
-+            gl->bits = malloc((size_t)width * height * 4);
-+            gl->bits_size = gl->bits ? (size_t)width * height * 4 : 0;
-+            gl->row = malloc((size_t)width * 4);
-+        }
-+        if (!gl->bits || !gl->row) return FALSE;
-+
-+        pglReadBuffer(gl->base.doublebuffer ? GL_BACK : GL_FRONT);
-+        pglReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_INT_8_8_8_8_REV, gl->bits);
-+        /* glReadPixels returns bottom-up rows, GDI wants top-down here */
-+        for (int y = 0; y < height / 2; y++)
-+        {
-+            unsigned char *top = (unsigned char *)gl->bits + (size_t)y * width * 4;
-+            unsigned char *bottom = (unsigned char *)gl->bits + (size_t)(height - 1 - y) * width * 4;
-+            memcpy(gl->row, top, (size_t)width * 4);
-+            memcpy(top, bottom, (size_t)width * 4);
-+            memcpy(bottom, gl->row, (size_t)width * 4);
-+        }
-+        blit_frame_to_window(gl, width, height);
-+    }
-+
++    if (offscreen) read_offscreen_frame(client, base->doublebuffer);
      macdrv_flush_opengl_context(context->context);
++    /* present the frame through the window surface, or give the view back once the children are gone */
++    if (offscreen || gl->offscreen) client_surface_present(base->client);
++    gl->offscreen = offscreen;
      return TRUE;
  }
+ 

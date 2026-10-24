@@ -1,3 +1,4 @@
 test/glchild_overlay32.exe
+test/pixstat
 *.log
 *.dxvk-cache

@@ -3,11 +3,11 @@
 - `winemac-offscreen-children.patch` is a derivative work of Wine's `dlls/winemac.drv` and is distributed under
   the **GNU Lesser General Public License, version 2.1 or later**. The full license text is in `COPYING.LIB`.
   It is provided as source (a patch) so recipients can modify and rebuild it.
-- `test/glchild_overlay.c` and `test/build.sh` are released under the **MIT License** (below).
+- `test/glchild_overlay.c`, `test/pixstat.swift` and `test/build.sh` are released under the **MIT License** (below).
 - The README/UPSTREAM text and the screenshots in `evidence/` are released under **CC BY 4.0**.
 
-**No warranty.** The patch was **vibe-coded** (AI-assisted) in a real debugging session; it is a workaround,
-not a supported product. Use at your own risk, review the diff first, and keep a backup of the original driver.
+**No warranty.** The patch was **vibe-coded** (AI-assisted: v0.1.0 with DeepSeek Harness, v0.2.0 with Claude Code)
+in real debugging sessions; it is a workaround, not a supported product. Use at your own risk, review the diff first, and keep a backup of the original driver.
 
 ## MIT License (test harness)
 

@@ -8,16 +8,20 @@ window's GDI content (and its child windows) disappears behind the GL/Vulkan sur
 - Repo: https://gitlab.winehq.org/wine/wine
 - Create an account, fork, add the patch as a commit with a proper message and a `Signed-off-by:` line
   (Developer Certificate of Origin), open a Merge Request against `dlls/winemac.drv`.
-- Suggested commit subject: `winemac.drv: Present GL frames offscreen while the window has visible children.`
-- Expect discussion: upstream may prefer sharing the surface with the compositor (IOSurface/CALayer) instead of
-  reading pixels back; the MR is still the right place to make the problem visible.
+- Suggested commit subject: `winemac.drv: Present OpenGL windows through the window surface while child windows cover them.`
+  The commit message body can be the header of `winemac-offscreen-children.patch`.
+- Since v0.2.0 the patch follows the model win32u already provides and winex11 uses (`client_surface.offscreen`
+  + `present(hdc)`), which should make review easier than v0.1.0.
+- Expect discussion: upstream may prefer an asynchronous readback or sharing the surface with the compositor
+  (IOSurface/CALayer) instead of a synchronous `glReadPixels`; the MR is still the right place to make the
+  problem visible.
 
 ## 2. WineHQ Bugzilla (a new bug)
 
 - https://bugs.winehq.org/ - product Wine, component `wine-mac-driver`.
 - Suggested summary: `winemac: GDI child windows are invisible over an OpenGL window (CEF/Chromium panels blank)`
 - **Filed:** https://bugs.winehq.org/show_bug.cgi?id=60578 (component `winemac.drv`, version 11.0, MacOS / x86-64).
-- Attach or link the patch and the test app; mention reproduction steps and the negative results
+- Attach or link the patch and the test app (v0.2.0 replaces v0.1.0; say so in a bug comment); mention reproduction steps and the negative results
   (`OpenGLSurfaceMode=behind/transparent`, DXVK/Metal).
 - Related but different (Windows-side, keep separate): bug 58921 (WebView2 + Windows >= 8.1) and 59370
   (CEF 109 blank via D3D11 shared textures).
@@ -45,7 +49,8 @@ window's GDI content (and its child windows) disappears behind the GL/Vulkan sur
 ## Disclosure
 
 When posting upstream, say that the patch is **AI-assisted / vibe-coded** and a workaround, not production code:
-reviewers deserve to know how it was produced. Mention the tested versions and the limitations in the README.
+reviewers deserve to know how it was produced (v0.1.0: DeepSeek Harness; v0.2.0: Claude Code, model Claude Opus
+5.5; both human-steered and tested). Mention the tested versions and the limitations in the README.
 
 ## Suggested repo metadata
 
