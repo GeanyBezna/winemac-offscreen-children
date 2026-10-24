@@ -2,6 +2,12 @@
 
 **Status:** workaround, not upstreamed (2026-10-24). Feedback and better implementations are welcome.
 
+> **Vibe-coded / AI-assisted.** This was produced in one debugging session by a human + an AI coding agent
+> (DeepSeek Harness): the agent ran the experiments, wrote the patch, the harness and these notes, with the human
+> steering and testing. It is **not production-grade**: no warranty, no support, no guarantee it will not break
+> your Wine/CrossOver setup. Read the diff, keep a backup of your driver, test in a throwaway prefix, and improve
+> it as you see fit.
+
 **Tested on:** Wine 11.0 built from CrossOver 26.2.0 sources, macOS 26, Apple Silicon (Rosetta/WoW64 prefix).
 
 ## Problem

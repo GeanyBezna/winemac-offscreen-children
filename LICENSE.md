@@ -6,6 +6,9 @@
 - `test/glchild_overlay.c` and `test/build.sh` are released under the **MIT License** (below).
 - The README/UPSTREAM text and the screenshots in `evidence/` are released under **CC BY 4.0**.
 
+**No warranty.** The patch was **vibe-coded** (AI-assisted) in a real debugging session; it is a workaround,
+not a supported product. Use at your own risk, review the diff first, and keep a backup of the original driver.
+
 ## MIT License (test harness)
 
 Copyright (c) 2026 the contributors

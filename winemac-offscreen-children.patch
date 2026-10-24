@@ -8,6 +8,7 @@
 # visible children, present the GL view normally (no per-frame copy).  Environment-level
 # only: no game/client files are touched.
 #
+# AI-assisted ("vibe-coded") during a real debugging session; workaround, no warranty, review before use.
 # Build: ~/GameLab/build/cx-26.2.0-x11 (configures against ~/GameLab/src/cx-26.2.0/sources/wine)
 #   make -j8 dlls/winemac.drv/winemac.so
 #   cp dlls/winemac.drv/winemac.so ~/GameLab/wine-cx-x11/lib/wine/x86_64-unix/winemac.so

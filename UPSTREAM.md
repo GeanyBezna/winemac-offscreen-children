@@ -41,6 +41,11 @@ window's GDI content (and its child windows) disappears behind the GL/Vulkan sur
 - game or launcher files (copyright);
 - the private ticket documents from the department.
 
+## Disclosure
+
+When posting upstream, say that the patch is **AI-assisted / vibe-coded** and a workaround, not production code:
+reviewers deserve to know how it was produced. Mention the tested versions and the limitations in the README.
+
 ## Suggested repo metadata
 
 - name: `winemac-offscreen-children`
