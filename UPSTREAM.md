@@ -16,6 +16,7 @@ window's GDI content (and its child windows) disappears behind the GL/Vulkan sur
 
 - https://bugs.winehq.org/ - product Wine, component `wine-mac-driver`.
 - Suggested summary: `winemac: GDI child windows are invisible over an OpenGL window (CEF/Chromium panels blank)`
+- **Filed:** https://bugs.winehq.org/show_bug.cgi?id=60578 (component `winemac.drv`, version 11.0, MacOS / x86-64).
 - Attach or link the patch and the test app; mention reproduction steps and the negative results
   (`OpenGLSurfaceMode=behind/transparent`, DXVK/Metal).
 - Related but different (Windows-side, keep separate): bug 58921 (WebView2 + Windows >= 8.1) and 59370

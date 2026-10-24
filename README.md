@@ -10,6 +10,8 @@
 
 **Tested on:** Wine 11.0 built from CrossOver 26.2.0 sources, macOS 26, Apple Silicon (Rosetta/WoW64 prefix).
 
+**Upstream bug:** [WineHQ Bugzilla 60578](https://bugs.winehq.org/show_bug.cgi?id=60578) (component `winemac.drv`).
+
 ## Problem
 
 Under Wine's macOS driver (`winemac.drv`), a window that renders with OpenGL shows its GDI child windows
